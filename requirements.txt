@@ -1,0 +1,6 @@
+Flask
+requests
+websocket-client
+Pillow
+psycopg2-binary
+gunicorn
