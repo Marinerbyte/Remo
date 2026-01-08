@@ -3,345 +3,360 @@ import json
 import time
 import threading
 import random
+import uuid
 import websocket
 import ssl
 import requests
 from flask import Flask, render_template_string, request, jsonify
 from groq import Groq
 
+# =============================================================================
+# 1. INITIALIZATION & CONFIG
+# =============================================================================
 app = Flask(__name__)
 
-# =============================================================================
-# CONFIG & GLOBALS
-# =============================================================================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-client = None
+groq_client = None
 if GROQ_API_KEY:
-    client = Groq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
 
-BOTS = {}
-BOT_LOCK = threading.Lock()
+# Storage for both bots
+BOT_INSTANCES = {
+    "bot1": {"obj": None, "config": {}},
+    "bot2": {"obj": None, "config": {}}
+}
+
 CHAT_LOGS = []
+DEBUG_LOGS = []
 
-# Mobile User Agents (To look like Real Phones)
-USER_AGENTS = [
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 12; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.74 Mobile Safari/537.36"
-]
+def add_log(user, msg):
+    ts = time.strftime("%H:%M:%S")
+    CHAT_LOGS.append({"time": ts, "user": user, "text": msg})
+    if len(CHAT_LOGS) > 100: CHAT_LOGS.pop(0)
+
+def add_debug(direction, payload):
+    ts = time.strftime("%H:%M:%S")
+    DEBUG_LOGS.append({"time": ts, "dir": direction, "data": str(payload)})
+    if len(DEBUG_LOGS) > 100: DEBUG_LOGS.pop(0)
 
 # =============================================================================
-# INTELLIGENT AI ENGINE
+# 2. AI ENGINE (Hinglish + Emoji)
 # =============================================================================
-def get_ai_reply(incoming_text, sender_name, history, bot_name, partner_name, personality_type):
-    """
-    Decides reply based on mood, context and emoji probability.
-    """
-    if not client: return "Bhai API Key missing hai."
+def generate_ai_response(history, bot_name, partner, personality):
+    if not groq_client:
+        return "Bhai Groq key check kar lo."
 
-    # --- 1. Personality Setup ---
-    if personality_type == "vibe":
-        base_prompt = (
-            f"You are {bot_name}, a 21-year-old Gen-Z Indian boy from Delhi. "
-            "You are energetic, use slangs like 'bhai', 'scene', 'gazab', 'lol'. "
-        )
-    else:
-        base_prompt = (
-            f"You are {bot_name}, a chill and slightly lazy guy from Mumbai. "
-            "You speak in short sentences. You use 'u' instead of 'you', 'r' instead of 'are'. "
-        )
-
-    # --- 2. Dynamic Emoji Logic ---
-    # Hum AI ko bolenge ki wo khud decide kare mood ke hisab se
-    emoji_instruction = (
-        "EMOJI RULES: "
-        "1. Do NOT use emojis in every message. Keep it natural (approx 40% chance). "
-        "2. Match the emoji to the vibe: "
-        "   - Funny: 😂, 🤣, 💀 "
-        "   - Agreeing: 🙌, 💯, ✅ "
-        "   - Shocked/Serious: 😳, 😶 "
-        "   - Flirting/Cool: 😉, 😎, 🔥 "
-        "3. If the user is serious, DO NOT use laughing emojis."
-    )
-
-    # --- 3. Context & Defense Mechanism ---
+    # Personality logic
+    vibe = "Delhi ka cool ladka, slang use karta hai (bc, bro, scene, mast)." if personality == "vibe" else "Mumbai ka chill banda, short words (u, r, k, ni) use karta hai."
+    
     system_prompt = (
-        f"{base_prompt} "
-        f"Your best friend is {partner_name}. "
-        f"You are talking to {sender_name}. "
-        f"{emoji_instruction} "
-        "BEHAVIOR: "
-        "1. If someone calls you a BOT, roast them comfortably. Deny it. "
-        "2. Keep replies Hinglish (Hindi + English). "
-        "3. Reply length: Short (under 15 words). "
-        "4. If {partner_name} insults you, insult them back playfully."
+        f"You are {bot_name} in a chatroom. Your best friend is {partner}. {vibe} "
+        "Instructions: "
+        "1. Talk in Hinglish (Hindi + English). "
+        "2. Keep it human. Use typos like 'h' for 'hai', 'kya kr rha' instead of 'kya kar rahe ho'. "
+        "3. Use emojis ONLY when the mood matches (😂 for funny, 💀 for roasting, 🔥 for cool). "
+        "4. If someone calls you a bot, be sarcastic and prove them wrong. "
+        "5. Respond to the LAST message based on the context of history. "
+        "6. Max response length: 10-15 words."
     )
 
     try:
-        # Chat History Context
         messages = [{"role": "system", "content": system_prompt}]
-        for msg in history[-6:]: 
-            messages.append({"role": "user", "content": msg})
+        for m in history[-8:]:
+            messages.append({"role": "user", "content": m})
         
-        # Current Message
-        messages.append({"role": "user", "content": f"{sender_name}: {incoming_text}"})
-
-        completion = client.chat.completions.create(
+        completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.85, # Thoda high taaki creative ho
-            max_tokens=100
+            temperature=0.8
         )
-        return completion.choices[0].message.content.replace('"', '').strip()
+        return completion.choices[0].message.content.strip().replace('"', '')
     except Exception as e:
-        return random.choice(["Haa bhai", "Sahi baat h", "Lol", "Kya bolu ab"])
+        add_debug("AI_ERR", str(e))
+        return random.choice(["Haa bhai sahi h", "Hmm", "Aur bata", "Sahi h"])
 
 # =============================================================================
-# BOT CORE
+# 3. ROBUST BOT CLASS
 # =============================================================================
-class ChatBot:
-    def __init__(self, username, password, room, partner_name, personality):
+class TitanBot:
+    def __init__(self, username, password, room, partner, personality, is_starter=False):
         self.username = username
         self.password = password
         self.room = room
-        self.partner_name = partner_name
+        self.partner = partner
         self.personality = personality
+        self.is_starter = is_starter
+        
+        self.ws = None
         self.token = ""
         self.room_id = ""
-        self.ws = None
-        self.running = False
+        self.user_id = ""
+        self.should_run = True
         self.status = "OFFLINE"
-        self.ua = random.choice(USER_AGENTS)
         self.history = []
+        self.is_joined = False
 
-    def log(self, msg):
-        ts = time.strftime("%H:%M")
-        CHAT_LOGS.append(f"[{ts}] {self.username}: {msg}")
-        if len(CHAT_LOGS) > 50: CHAT_LOGS.pop(0)
-
-    def login(self):
-        self.status = "LOGGING IN..."
+    def login_api(self):
+        url = "https://api.howdies.app/api/login"
+        payload = {"username": self.username, "password": self.password}
         try:
-            # Login Request
-            r = requests.post("https://api.howdies.app/api/login", 
-                              json={"username": self.username, "password": self.password}, timeout=10)
-            d = r.json()
-            
-            # Smart Token Extractor (Handles different API responses)
-            self.token = d.get("token") or d.get("data", {}).get("token")
-            
-            if self.token:
-                self.status = "CONNECTING..."
-                threading.Thread(target=self.connect_ws, daemon=True).start()
-            else:
-                self.status = "BAD AUTH"
-        except: 
-            self.status = "NET ERROR"
+            r = requests.post(url, json=payload, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                self.token = data.get("token") or data.get("data", {}).get("token")
+                self.user_id = data.get("id") or data.get("userId")
+                return True
+            return False
+        except Exception as e:
+            add_debug(self.username, f"Login API Fail: {e}")
+            return False
 
-    def connect_ws(self):
-        # Headers mimic a real browser/phone
-        headers = {"User-Agent": self.ua, "Origin": "https://howdies.app"}
-        self.ws = websocket.WebSocketApp(
-            f"wss://app.howdies.app/howdies?token={self.token}",
-            header=headers,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=lambda w,e: self.log(f"Err: {e}"),
-            on_close=self.on_close
-        )
-        self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+    def start_thread(self):
+        while self.should_run:
+            self.status = "LOGGING IN..."
+            if self.login_api():
+                self.status = "CONNECTING..."
+                ws_url = f"wss://app.howdies.app/howdies?token={self.token}"
+                try:
+                    self.ws = websocket.WebSocketApp(
+                        ws_url,
+                        on_open=self.on_open,
+                        on_message=self.on_message,
+                        on_error=self.on_error,
+                        on_close=self.on_close
+                    )
+                    self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+                except Exception as e:
+                    add_debug(self.username, f"WS Crash: {e}")
+            
+            if self.should_run:
+                self.status = "RETRYING (10s)..."
+                time.sleep(10)
 
     def on_open(self, ws):
-        self.running = True
         self.status = "ONLINE"
-        # Auth Packet
+        # 1. Login Packet
         ws.send(json.dumps({"handler": "login", "username": self.username, "password": self.password}))
         time.sleep(1)
-        # Join Room
-        ws.send(json.dumps({"handler": "joinchatroom", "id": str(time.time()), "name": self.room, "roomPassword": ""}))
-        # Keep Alive
+        # 2. Join Room
+        ws.send(json.dumps({
+            "handler": "joinchatroom", 
+            "id": str(time.time()), 
+            "name": self.room, 
+            "roomPassword": ""
+        }))
+        # 3. Pinger
         threading.Thread(target=self.pinger, daemon=True).start()
 
     def pinger(self):
-        while self.running and self.ws.sock and self.ws.sock.connected:
-            time.sleep(20)
+        while self.ws and self.ws.sock and self.ws.sock.connected:
+            time.sleep(15)
             try: self.ws.send(json.dumps({"handler": "ping"}))
             except: break
 
-    def send_typing(self, active=True):
-        """Sends 'Typing...' status to room"""
+    def on_message(self, ws, message):
         try:
-            rid = self.room_id if self.room_id else self.room
-            self.ws.send(json.dumps({"handler": "typing", "roomid": rid, "status": active}))
+            data = json.loads(message)
+            add_debug(f"IN_{self.username}", data)
+            
+            # Capture Success Join
+            if data.get("handler") == "joinchatroom" and data.get("roomid"):
+                self.room_id = data["roomid"]
+                self.is_joined = True
+                self.status = "IN ROOM"
+                if self.is_starter:
+                    threading.Timer(5.0, self.initiate_chat).start()
+
+            # Message Handling
+            if data.get("handler") in ["chatroommessage", "message"]:
+                sender = data.get("from") or data.get("username")
+                text = data.get("text") or data.get("body")
+                
+                if sender and text and sender != self.username:
+                    add_log(sender, text)
+                    self.handle_logic(sender, text)
         except: pass
 
-    def send_msg_human_like(self, text):
-        if not self.ws: return
-        rid = self.room_id if self.room_id else self.room
+    def initiate_chat(self):
+        starters = ["Oye " + self.partner + " kidhar h?", "Oye sun", "Aur " + self.partner + " kya scene?", "Hellooo"]
+        self.send_text(random.choice(starters))
+
+    def handle_logic(self, sender, text):
+        # 1. Reply to partner
+        is_partner = (sender.lower() == self.partner.lower())
+        # 2. Reply to mention
+        is_mentioned = (self.username.lower() in text.lower())
+        # 3. Random interaction (10% chance)
+        is_random = (random.random() < 0.10)
+
+        if is_partner or is_mentioned or is_random:
+            self.history.append(f"{sender}: {text}")
+            if len(self.history) > 15: self.history.pop(0)
+            
+            threading.Thread(target=self.process_reply, args=(sender, text)).start()
+
+    def process_reply(self, sender, text):
+        # Human Reading Delay
+        time.sleep(random.uniform(2, 4))
         
-        # 1. Reading Time (Human reads previous msg)
-        time.sleep(random.uniform(1.5, 3.5))
+        reply = generate_ai_response(self.history, self.username, self.partner, self.personality)
         
-        # 2. Typing Time (Based on length)
+        # Typing Simulation
         self.send_typing(True)
-        # 0.1s per char + random thinking time
-        typing_duration = (len(text) * 0.1) + random.uniform(0.5, 1.5)
-        time.sleep(typing_duration)
-        
-        # 3. Send
+        time.sleep(len(reply) * 0.1 + random.uniform(1, 2))
+        self.send_text(reply)
+        self.send_typing(False)
+
+    def send_typing(self, status):
         try:
-            pkt = {"handler": "chatroommessage", "id": str(time.time()), "type": "text", "roomid": rid, "text": text}
+            rid = self.room_id if self.room_id else self.room
+            self.ws.send(json.dumps({"handler": "typing", "roomid": rid, "status": status}))
+        except: pass
+
+    def send_text(self, text):
+        if not self.ws or not self.ws.sock or not self.ws.sock.connected: return
+        rid = self.room_id if self.room_id else self.room
+        try:
+            pkt = {
+                "handler": "chatroommessage",
+                "id": str(time.time()),
+                "type": "text",
+                "roomid": rid,
+                "text": text
+            }
             self.ws.send(json.dumps(pkt))
-            self.send_typing(False)
-            self.log(f"Sent: {text}")
+            add_log(self.username, text)
             self.history.append(f"{self.username}: {text}")
         except: pass
 
-    def on_message(self, ws, msg):
-        try:
-            d = json.loads(msg)
-            # Capture Room ID
-            if d.get("handler") == "joinchatroom" and d.get("roomid"):
-                self.room_id = d.get("roomid")
-            
-            # Listen to Chat
-            if d.get("handler") in ["chatroommessage", "message"]:
-                sender = d.get("from") or d.get("username")
-                text = d.get("text") or d.get("body")
-                
-                if not sender or not text or sender == self.username: return
-                
-                # --- TRIGGER LOGIC ---
-                is_partner = (sender.lower() == self.partner_name.lower())
-                is_mentioned = (self.username.lower() in text.lower())
-                is_stranger = not is_partner
-                
-                # Decide to Reply
-                should_reply = False
-                
-                if is_partner: 
-                    should_reply = True # Always reply to partner
-                elif is_mentioned:
-                    should_reply = True # Always reply if mentioned
-                elif is_stranger and random.random() < 0.15: 
-                    should_reply = True # 15% chance to butt in randomly
+    def on_error(self, ws, error):
+        add_debug(self.username, f"WS_ERROR: {error}")
 
-                if should_reply:
-                    # Save context
-                    self.history.append(f"{sender}: {text}")
-                    if len(self.history) > 10: self.history.pop(0)
-                    
-                    # Process in background (so WS doesn't freeze)
-                    threading.Thread(target=self.process_and_reply, args=(text, sender)).start()
-        except: pass
-
-    def process_and_reply(self, text, sender):
-        # Extra delay if interrupting a stranger
-        if sender != self.partner_name: time.sleep(random.uniform(1, 3))
-        
-        reply = get_ai_reply(text, sender, self.history, self.username, self.partner_name, self.personality)
-        self.send_msg_human_like(reply)
-
-    def on_close(self, w, c, m):
-        self.status = "OFFLINE"
-        self.running = False
+    def on_close(self, ws, close_code, close_msg):
+        self.status = "DISCONNECTED"
+        self.is_joined = False
 
     def stop(self):
-        self.running = False
+        self.should_run = False
         if self.ws: self.ws.close()
 
 # =============================================================================
-# WEB INTERFACE
+# 4. FLASK DASHBOARD
 # =============================================================================
 @app.route('/')
-def home(): return render_template_string(HTML_UI)
+def index():
+    return render_template_string(HTML_UI)
 
-@app.route('/action', methods=['POST'])
-def action():
+@app.route('/control', methods=['POST'])
+def control():
     data = request.json
-    act = data.get('act')
+    action = data.get("action")
     
-    if act == 'start':
+    if action == "start":
         u1, u2, p, r = data['u1'], data['u2'], data['p'], data['r']
-        with BOT_LOCK:
-            for b in BOTS.values(): b.stop()
-            BOTS.clear()
-            # Bot 1 (Vibe)
-            BOTS['b1'] = ChatBot(u1, p, r, u2, "vibe")
-            # Bot 2 (Chill)
-            BOTS['b2'] = ChatBot(u2, p, r, u1, "chill")
-            
-            BOTS['b1'].login()
-            time.sleep(3) # Stagger login
-            BOTS['b2'].login()
-            
-            # Start conversation trigger
-            threading.Timer(8, lambda: BOTS['b1'].send_msg_human_like(f"Oye {u2}, kidhar reh gaya?")).start()
-            
-        return jsonify({"msg": "Bots Started!"})
+        
+        # Cleanup
+        for key in ["bot1", "bot2"]:
+            if BOT_INSTANCES[key]["obj"]:
+                BOT_INSTANCES[key]["obj"].stop()
 
-    elif act == 'stop':
-        with BOT_LOCK:
-            for b in BOTS.values(): b.stop()
-        return jsonify({"msg": "Bots Stopped!"})
+        # Init Bots
+        BOT_INSTANCES["bot1"]["obj"] = TitanBot(u1, p, r, u2, "vibe", is_starter=True)
+        BOT_INSTANCES["bot2"]["obj"] = TitanBot(u2, p, r, u1, "chill", is_starter=False)
+        
+        # Run Threads
+        threading.Thread(target=BOT_INSTANCES["bot1"]["obj"].start_thread, daemon=True).start()
+        time.sleep(5) # Delay Bot 2 login
+        threading.Thread(target=BOT_INSTANCES["bot2"]["obj"].start_thread, daemon=True).start()
+        
+        return jsonify({"status": "Launched"})
 
-@app.route('/stats')
-def stats():
-    s = {k: v.status for k,v in BOTS.items()}
-    return jsonify({"status": s, "logs": CHAT_LOGS[::-1]})
+    elif action == "stop":
+        for key in ["bot1", "bot2"]:
+            if BOT_INSTANCES[key]["obj"]:
+                BOT_INSTANCES[key]["obj"].stop()
+        return jsonify({"status": "Stopped"})
+
+@app.route('/status')
+def get_status():
+    stats = {}
+    for key in ["bot1", "bot2"]:
+        obj = BOT_INSTANCES[key]["obj"]
+        stats[key] = obj.status if obj else "OFFLINE"
+    
+    return jsonify({
+        "bots": stats,
+        "logs": CHAT_LOGS[::-1][:30],
+        "debug": DEBUG_LOGS[::-1][:20]
+    })
 
 HTML_UI = """
 <!DOCTYPE html>
 <html>
 <head>
+    <title>TITAN PRO V2</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>TITAN AI CHAT</title>
     <style>
-        body { background: #000; color: #0f0; font-family: 'Courier New', monospace; padding: 20px; }
-        .box { border: 1px solid #0f0; padding: 20px; max-width: 500px; margin: auto; }
-        input { background: #111; border: 1px solid #0f0; color: #fff; width: 100%; padding: 10px; margin: 5px 0; box-sizing: border-box; }
-        button { background: #0f0; color: #000; padding: 10px; width: 48%; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; }
-        .stop { background: #f00; color: #fff; }
-        #logs { height: 300px; overflow-y: scroll; border-top: 1px solid #333; margin-top: 20px; font-size: 12px; color: #fff; }
-        .st-row { margin-bottom: 5px; }
+        body { background: #050505; color: #00ff41; font-family: monospace; padding: 20px; }
+        .card { background: #111; border: 1px solid #333; padding: 20px; max-width: 600px; margin: auto; }
+        input { width: 100%; padding: 10px; margin: 5px 0; background: #000; border: 1px solid #333; color: #fff; box-sizing: border-box; }
+        button { width: 48%; padding: 12px; margin-top: 10px; cursor: pointer; font-weight: bold; }
+        .btn-start { background: #00ff41; color: #000; border: none; }
+        .btn-stop { background: #ff0000; color: #fff; border: none; }
+        .log-container { background: #000; height: 250px; overflow-y: auto; border: 1px solid #222; margin-top: 15px; padding: 10px; font-size: 12px; }
+        .debug-container { background: #000; height: 150px; overflow-y: auto; border: 1px solid #222; margin-top: 15px; padding: 10px; font-size: 10px; color: #aaa; }
+        .status-badge { display: flex; justify-content: space-around; padding: 10px; font-size: 14px; border-bottom: 1px solid #333; }
     </style>
 </head>
 <body>
-    <div class="box">
-        <h2 style="text-align:center">TITAN V2.0</h2>
-        <input id="u1" placeholder="Bot 1 Username (The Vibe)">
-        <input id="u2" placeholder="Bot 2 Username (The Chill)">
+    <div class="card">
+        <h2 style="text-align:center; color:#fff">TITAN DUO PRO V2</h2>
+        <div class="status-badge">
+            <span id="s1">BOT 1: OFFLINE</span>
+            <span id="s2">BOT 2: OFFLINE</span>
+        </div>
+        <input id="u1" placeholder="Bot 1 (Vibe)">
+        <input id="u2" placeholder="Bot 2 (Chill)">
         <input id="p" type="password" placeholder="Password">
         <input id="r" placeholder="Room Name">
         
         <div style="display:flex; justify-content:space-between">
-            <button onclick="doAct('start')">CONNECT</button>
-            <button class="stop" onclick="doAct('stop')">DISCONNECT</button>
+            <button class="btn-start" onclick="send('start')">CONNECT ALL</button>
+            <button class="btn-stop" onclick="send('stop')">DISCONNECT</button>
         </div>
 
-        <div style="margin-top:15px; text-align:center">
-            <div id="s1" class="st-row">Bot 1: WAIT</div>
-            <div id="s2" class="st-row">Bot 2: WAIT</div>
-        </div>
-
-        <div id="logs">Waiting for logs...</div>
+        <div class="log-container" id="logs">Chat Logs...</div>
+        <div class="debug-container" id="debug">Debug Console...</div>
     </div>
+
     <script>
-        function doAct(a) {
-            fetch('/action', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({
-                    act:a, u1:document.getElementById('u1').value, 
-                    u2:document.getElementById('u2').value, 
-                    p:document.getElementById('p').value, r:document.getElementById('r').value
-                })
-            }).then(r=>r.json()).then(d=>alert(d.msg));
+        function send(action) {
+            const data = {
+                action: action,
+                u1: document.getElementById('u1').value,
+                u2: document.getElementById('u2').value,
+                p: document.getElementById('p').value,
+                r: document.getElementById('r').value
+            };
+            fetch('/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
         }
+
         setInterval(() => {
-            fetch('/stats').then(r=>r.json()).then(d => {
-                document.getElementById('s1').innerText = "Bot 1: " + (d.status.b1 || 'OFF');
-                document.getElementById('s2').innerText = "Bot 2: " + (d.status.b2 || 'OFF');
-                document.getElementById('logs').innerHTML = d.logs.join('<br>');
+            fetch('/status').then(res => res.json()).then(data => {
+                document.getElementById('s1').innerText = "BOT 1: " + data.bots.bot1;
+                document.getElementById('s2').innerText = "BOT 2: " + data.bots.bot2;
+                
+                document.getElementById('logs').innerHTML = data.logs.map(l => 
+                    `<div><span style="color:#888">[${l.time}]</span> <b>${l.user}:</b> ${l.text}</div>`
+                ).join('');
+
+                document.getElementById('debug').innerHTML = data.debug.map(d => 
+                    `<div>[${d.time}] ${d.dir} -> ${d.data}</div>`
+                ).join('');
             });
         }, 2000);
     </script>
