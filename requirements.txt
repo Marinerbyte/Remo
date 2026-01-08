@@ -1,6 +1,6 @@
-Flask
+flask
 requests
 websocket-client
-Pillow
-psycopg2-binary
+groq
 gunicorn
+python-dotenv
