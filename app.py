@@ -9,6 +9,8 @@ import ssl
 import requests
 from flask import Flask, render_template_string, request, jsonify
 from groq import Groq
+# --- DOTENV IMPORT ADDED ---
+from dotenv import load_dotenv 
 
 # Initialize Flask
 app = Flask(__name__)
@@ -16,6 +18,9 @@ app = Flask(__name__)
 # =============================================================================
 # 1. CONFIG & GLOBALS
 # =============================================================================
+# --- LOAD .ENV FILE ---
+load_dotenv()
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = None
 if GROQ_API_KEY:
@@ -182,7 +187,7 @@ class ChatBot:
             except: break
 
     def trigger_first_message(self):
-        # CHANGED: PK-style starter messages (no slang like 'bhai')
+        # PK-style starter messages (no slang like 'bhai')
         starters = ["Aapka kya haal hai?", "Suno suno", "Idhar kya chalta hai?", "Hello, aap kahan ho?"]
         msg = random.choice(starters)
         self.send_msg(msg)
